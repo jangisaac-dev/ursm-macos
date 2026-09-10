@@ -33,9 +33,24 @@ for c in curl tar shasum plutil xattr; do
   command -v "$c" >/dev/null || die "$c 가 없다."
 done
 # wine 은 x86_64 전용이다. Apple Silicon 에서는 Rosetta 가 있어야 한 줄도 못 뗀다.
+# 사용자가 따로 명령을 찾아 치게 하지 않고 여기서 대신 깔아 준다.
 if [ "$(uname -m)" = arm64 ] && ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
-  die "Rosetta 가 필요하다. 먼저 이 명령을 실행하라:
+  echo
+  echo "이 맥에는 Rosetta 가 필요합니다. 애플이 제공하는 구성 요소입니다."
+  printf "지금 설치할까요? [Y/n] "
+  read -r r </dev/tty || r=n
+  case "$r" in
+    [nN]*) die "Rosetta 없이는 설치할 수 없습니다." ;;
+  esac
+  echo "Rosetta 를 설치합니다. 암호를 물어볼 수 있습니다."
+  softwareupdate --install-rosetta --agree-to-license </dev/tty \
+    || sudo softwareupdate --install-rosetta --agree-to-license </dev/tty \
+    || die "Rosetta 설치에 실패했습니다. 터미널에 아래를 붙여넣어 직접 설치한 뒤
+다시 시도해 주세요.
+
   softwareupdate --install-rosetta --agree-to-license"
+  /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null \
+    || die "Rosetta 설치를 확인하지 못했습니다. 맥을 다시 시작한 뒤 시도해 주세요."
 fi
 
 # rm -rf 의 대상이 되므로 형태를 검사한다. URSM_DEST 를 잘못 주면
@@ -53,7 +68,7 @@ avail=$(printf '%s' "$avail" | awk 'NR==2{print $4}')
 # 동의만 미리 받고 실제 삭제는 내려받기가 다 끝난 뒤에 한다. 여기서 지우면
 # 다운로드나 해시 검증이 실패했을 때 멀쩡한 앱까지 잃는다.
 if [ -e "$DEST" ]; then
-  printf '%s 가 이미 있다. 지우고 다시 설치할까? [y/N] ' "$DEST"
+  printf '이미 설치돼 있습니다: %s\n지우고 새로 설치할까요? [y/N] ' "$DEST"
   read -r ans </dev/tty || ans=n
   case "$ans" in [yY]*) : ;; *) die "설치를 취소했다." ;; esac
 fi
@@ -233,14 +248,20 @@ trap - EXIT
 
 cat <<EOF
 
-설치 완료: $DEST
+설치가 끝났습니다.
 
-  open "$DEST"
+  다음부터는 Launchpad 나 Finder 의 "응용 프로그램" 폴더에서
+  URSM 을 열면 됩니다.
 
-로그: $LOG
-캐시(다시 설치할 때 재사용, 지워도 된다): $CACHE
+  처음 열 때는 화면이 나올 때까지 20초쯤 걸립니다.
 
-알려진 한계
-  - OZ 리포트 화면은 현재 구성에서 내용이 표시되지 않는다.
-  - 엑셀 내보내기는 지원되지 않는다.
+  안 되는 것: OZ 리포트는 내용이 표시되지 않고, 엑셀 내보내기는
+  지원되지 않습니다.
+
+  지우려면: rm -rf "$DEST"
+
 EOF
+
+# 지금 바로 열어 준다. Finder 에서 찾아 헤매지 않게.
+echo "URSM 을 여는 중입니다..."
+open "$DEST" 2>/dev/null || true
