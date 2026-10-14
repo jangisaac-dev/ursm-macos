@@ -8,6 +8,8 @@ set -eu
 DEST="${URSM_DEST:-$HOME/Applications/URSM.app}"
 CACHE="${URSM_CACHE:-$HOME/Library/Caches/URSM-install}"
 LOG="$HOME/Library/Logs/URSM-install.log"
+UPDATE_LATEST="${URSM_UPDATE_LATEST:-https://github.com/jangisaac-dev/ursm-macos/releases/latest}"
+UPDATE_RAW="${URSM_UPDATE_RAW:-https://raw.githubusercontent.com/jangisaac-dev/ursm-macos}"
 
 # --- 고정 구성요소 --------------------------------------------------------
 WRAPPER_URL="https://github.com/Sikarugir-App/Wrapper/releases/download/v1.0/Template-1.0.15.tar.xz"
@@ -32,6 +34,8 @@ die() { printf '\n실패: %s\n로그: %s\n' "$*" "$LOG" >&2; exit 1; }
 for c in curl tar shasum plutil xattr; do
   command -v "$c" >/dev/null || die "$c 가 없다."
 done
+CLT_AVAILABLE=0
+if /usr/bin/xcode-select -p >/dev/null 2>&1; then CLT_AVAILABLE=1; fi
 # wine 은 x86_64 전용이다. Apple Silicon 에서는 Rosetta 가 있어야 한 줄도 못 뗀다.
 # 사용자가 따로 명령을 찾아 치게 하지 않고 여기서 대신 깔아 준다.
 if [ "$(uname -m)" = arm64 ] && ! /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then
@@ -60,17 +64,29 @@ case "$DEST" in
   *) die "설치 경로는 .app 으로 끝나는 절대경로여야 한다: $DEST" ;;
 esac
 
-# 앱 1.2GB + 캐시 300MB. 여유 3GB 를 요구한다.
-avail=$(df -k "${DEST%/*}" 2>/dev/null || df -k "$HOME"; :)
-avail=$(printf '%s' "$avail" | awk 'NR==2{print $4}')
-[ "$avail" -gt 3145728 ] || die "디스크 여유가 3GB 미만이다."
-
-# 동의만 미리 받고 실제 삭제는 내려받기가 다 끝난 뒤에 한다. 여기서 지우면
-# 다운로드나 해시 검증이 실패했을 때 멀쩡한 앱까지 잃는다.
+UPDATE_MODE=0
 if [ -e "$DEST" ]; then
-  printf '이미 설치돼 있습니다: %s\n지우고 새로 설치할까요? [y/N] ' "$DEST"
-  read -r ans </dev/tty || ans=n
-  case "$ans" in [yY]*) : ;; *) die "설치를 취소했다." ;; esac
+  XP_EXISTING="$DEST/Contents/SharedSupport/prefix/drive_c/Program Files (x86)/TOBESOFT/XPLATFORM/9.2/XPlatform.exe"
+  if [ -f "$XP_EXISTING" ]; then
+    printf '이미 설치돼 있습니다: %s\n  [U] 업데이트 — 로그인 기록과 설정을 그대로 둡니다 (기본)\n  [r] 지우고 새로 설치\n  [n] 취소\n선택 [U/r/n] ' "$DEST"
+    read -r ans </dev/tty || ans=
+    case "$ans" in
+      ""|u|U) UPDATE_MODE=1 ;;
+      r|R) : ;;
+      *) die "설치를 취소했다." ;;
+    esac
+  else
+    printf '이미 설치돼 있습니다: %s\n지우고 새로 설치할까요? [y/N] ' "$DEST"
+    read -r ans </dev/tty || ans=n
+    case "$ans" in [yY]*) : ;; *) die "설치를 취소했다." ;; esac
+  fi
+fi
+
+if [ "$UPDATE_MODE" -eq 0 ]; then
+  # 앱 1.2GB + 캐시 300MB. 여유 3GB 를 요구한다.
+  avail=$(df -k "${DEST%/*}" 2>/dev/null || df -k "$HOME"; :)
+  avail=$(printf '%s' "$avail" | awk 'NR==2{print $4}')
+  [ "$avail" -gt 3145728 ] || die "디스크 여유가 3GB 미만이다."
 fi
 
 # --- 1. 내려받기 ----------------------------------------------------------
@@ -88,10 +104,101 @@ fetch() { # url sha 파일명
   배포처 파일이 바뀌었다. 설치를 중단한다."; }
   mv "$f.part" "$f"
 }
+
+fetch_app() {
+  # 최신 릴리즈 태그(vX.Y.Z). releases/latest 가 태그 주소로 리다이렉트한다. 못 얻으면 아무것도 바꾸지
+  # 않고 멈춘다(릴리즈하지 않은 main 의 코드를 깔지 않는다).
+  REF=$(curl -fsSI -m 15 --retry 3 -o /dev/null -w '%{redirect_url}' "$UPDATE_LATEST" 2>/dev/null || true)
+  case "$REF" in
+    */releases/tag/*) REF=${REF##*/releases/tag/} ;;
+    *) REF= ;;
+  esac
+  printf '%s' "$REF" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' \
+    || die "최신 릴리즈를 확인하지 못했다. 인터넷 연결을 확인하고 다시 실행해 주세요."
+
+  APP_STAGE="$CACHE/app.$$"
+  mkdir -p "$APP_STAGE"
+  log "앱 파일 받는 중: $REF"
+  curl -fL --retry 3 --progress-bar -o "$APP_STAGE/URSM" \
+    "$UPDATE_RAW/$REF/app/URSM" || die "URSM 런처 내려받기 실패"
+  curl -fL --retry 3 --progress-bar -o "$APP_STAGE/ozcap.py" \
+    "$UPDATE_RAW/$REF/app/ozcap.py" || die "ozcap.py 내려받기 실패"
+
+  [ -s "$APP_STAGE/URSM" ] || die "URSM 런처가 비어 있다."
+  [ "$(head -n 1 "$APP_STAGE/URSM")" = '#!/bin/zsh' ] \
+    || die "URSM 런처의 shebang 이 올바르지 않다."
+  /bin/zsh -n "$APP_STAGE/URSM" || die "URSM 런처 구문 검증에 실패했다."
+  [ -s "$APP_STAGE/ozcap.py" ] || die "ozcap.py 가 비어 있다."
+  [ "$(head -n 1 "$APP_STAGE/ozcap.py")" = '#!/usr/bin/env python3' ] \
+    || die "ozcap.py 의 shebang 이 올바르지 않다."
+  if [ "$CLT_AVAILABLE" -eq 1 ]; then
+    /usr/bin/python3 -I -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' \
+      "$APP_STAGE/ozcap.py" || die "ozcap.py 구문 검증에 실패했다."
+  fi
+}
+
+install_app() {
+  C="${C:-$DEST/Contents}"
+  RES="$C/Resources"
+  mkdir -p "$C/MacOS" "$RES"
+
+  # 세 파일을 전부 바꾸거나 전부 원래대로 둔다. 원래 없던 파일(v1.0.0 설치본의 ozcap·버전)은
+  # 실패하면 지운다. if 조건 안에서는 set -e 가 듣지 않으므로 && 로 잇는다.
+  BK="$RES/.install-backup.$$"
+  rm -rf "$BK"; mkdir -p "$BK"
+  for f in "$C/MacOS/URSM" "$RES/ozcap.py" "$RES/ursm-version"; do
+    if [ -e "$f" ]; then cp -p "$f" "$BK/${f##*/}"; fi
+  done
+  if ! { cp "$APP_STAGE/ozcap.py" "$RES/.ozcap.py.$$" \
+         && chmod 755 "$RES/.ozcap.py.$$" && mv "$RES/.ozcap.py.$$" "$RES/ozcap.py" \
+         && cp "$APP_STAGE/URSM" "$C/MacOS/.URSM.$$" \
+         && chmod 755 "$C/MacOS/.URSM.$$" && mv "$C/MacOS/.URSM.$$" "$C/MacOS/URSM" \
+         && printf '%s\n' "$REF" > "$RES/.ursm-version.$$" \
+         && mv "$RES/.ursm-version.$$" "$RES/ursm-version"; } 2>>"$LOG"; then
+    for f in "$C/MacOS/URSM" "$RES/ozcap.py" "$RES/ursm-version"; do
+      if [ -e "$BK/${f##*/}" ]; then cp -p "$BK/${f##*/}" "$f" 2>/dev/null || true
+      else rm -f "$f"; fi
+    done
+    rm -rf "$BK" "$RES/.ozcap.py.$$" "$C/MacOS/.URSM.$$" "$RES/.ursm-version.$$"
+    die "앱 파일을 바꾸지 못해 원래대로 되돌렸다."
+  fi
+  rm -rf "$BK"
+}
+
+offer_clt_install() {
+  [ "$CLT_AVAILABLE" -eq 1 ] && return 0
+  echo
+  printf '출력·엑셀 기능에는 Apple Command Line Tools 가 필요합니다. 지금 설치 창을 열까요? [Y/n] '
+  read -r clt_answer </dev/tty || clt_answer=n
+  case "$clt_answer" in
+    [nN]*) : ;;
+    *) /usr/bin/xcode-select --install >/dev/null 2>&1 || true ;;
+  esac
+}
+
+if [ "$UPDATE_MODE" -eq 1 ]; then
+  fetch_app
+  C="$DEST/Contents"
+  rm -rf "$C/Resources/.update"
+  rm -f "$C/Resources/.update-checked"
+  install_app
+  rm -rf "$APP_STAGE"
+  xattr -d com.apple.quarantine "$C/MacOS/URSM" "$C/Resources/ozcap.py" \
+    "$C/Resources/ursm-version" 2>/dev/null || true
+  offer_clt_install
+  cat <<EOF
+
+업데이트했습니다 (버전 $REF). URSM 이 켜져 있으면 종료 후 다시 열어야 적용됩니다.
+앞으로는 앱이 새 버전을 스스로 받아 둡니다.
+EOF
+  exit 0
+fi
+
 fetch "$WRAPPER_URL" "$WRAPPER_SHA" Template-1.0.15.tar.xz
 fetch "$ENGINE_URL"  "$ENGINE_SHA"  WS12WineCX24.0.7_7.tar.xz
 fetch "$XPLAT_URL"   "$XPLAT_SHA"   XPLATFORM9.2_SetupEngine.exe
 fetch "$GULIM_URL"   "$GULIM_SHA"   GULIM.TTC
+fetch_app
 
 # 네 파일이 모두 검증된 지금 시점에 기존 앱을 치운다.
 rm -rf "$DEST"
@@ -129,62 +236,8 @@ plutil -replace CFBundleName       -string URSM        "$C/Info.plist"
 plutil -replace CFBundleIdentifier -string ac.hansei.ursm.port "$C/Info.plist"
 
 # --- 3. 실행기 ------------------------------------------------------------
-cat > "$C/MacOS/URSM" <<'LAUNCHER'
-#!/bin/zsh
-APPKEY="URSM"
-XADL="http://ims.hansei.ac.kr/URSM.xadl"
-
-BUNDLE="${0:A:h:h}"
-BIN="$BUNDLE/Frameworks/wine/bin"
-export WINEPREFIX="$BUNDLE/SharedSupport/prefix"
-# mscoree(.NET)만 끈다. mshtml 은 끄지 않는다 — 출력 화면이 Shell.Explorer.2
-# 웹브라우저 컨트롤이라, 끄면 빈 흰 창이 된다.
-export WINEDLLOVERRIDES="mscoree="
-export WINEDEBUG=-all
-export PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin"
-# 로그는 번들 밖에 둔다. 번들 안에 쓰면 권한 거부로 리다이렉트가 실패하고
-# 앱이 즉시 죽는다.
-LOG="$HOME/Library/Logs/URSM.log"
-mkdir -p "${LOG:h}" 2>/dev/null
-
-# wine 창은 앱 번들 소속이 아니어서 저절로 앞에 오지 않는다.
-# 접근성 권한이 없으면 조용히 실패한다 — 창은 그대로 뜬다.
-bring_to_front() {
-  for _ in {1..60}; do
-    if pgrep -x -q "XPlatform.exe" 2>/dev/null; then
-      /usr/bin/osascript -e 'tell application "System Events" to set frontmost of (first process whose name is "XPlatform.exe") to true' 2>/dev/null
-      return
-    fi
-    sleep 2
-  done
-}
-
-# 프로세스 판별은 실행파일 이름으로만 한다. pgrep -f 는 명령줄 전체를 훑어
-# 무관한 셸까지 오탐한다.
-if pgrep -x -q "XPlatform.exe" 2>/dev/null; then
-  bring_to_front
-  exit 0
-fi
-
-# 비정상 종료로 남은 고아 wine 프로세스 정리 (wineserver -k 로는 안 죽는다)
-"$BIN/wineserver" -k 2>/dev/null
-# zsh 에서 path 는 PATH 와 연결된 특수 배열이라 변수 이름으로 쓰면 PATH 가 깨진다.
-/bin/ps -Ao pid=,comm= | while read -r pid pcomm; do
-  case "$pcomm" in
-    *winetemp-*) /usr/sbin/lsof -p "$pid" 2>/dev/null | /usr/bin/grep -qF "$BUNDLE" \
-                 && /bin/kill -9 "$pid" 2>/dev/null ;;
-  esac
-done
-
-cd "$BIN" || exit 1
-# exec 하지 않는다. 이 프로세스가 앱 본체로 살아 있어야 Dock 아이콘이 튀지 않는다.
-./wine "C:\\Program Files (x86)\\TOBESOFT\\XPLATFORM\\9.2\\XPlatform.exe" \
-       -K "$APPKEY" -X "$XADL" >"$LOG" 2>&1 &
-WINE_PID=$!
-bring_to_front
-wait $WINE_PID
-LAUNCHER
-chmod +x "$C/MacOS/URSM"
+install_app
+rm -rf "$APP_STAGE"
 
 # --- 4. wine prefix ------------------------------------------------------
 BIN="$C/Frameworks/wine/bin"
@@ -244,19 +297,22 @@ XP="$WINEPREFIX/drive_c/Program Files (x86)/TOBESOFT/XPLATFORM/9.2/XPlatform.exe
 # 서명은 손대지 않는다. 뼈대 서명은 이미 무효지만 실행에는 지장이 없고,
 # 격리 속성만 벗기면 Gatekeeper 를 통과한다.
 xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+offer_clt_install
 trap - EXIT
 
 cat <<EOF
 
-설치가 끝났습니다.
+설치가 끝났습니다 (버전 $REF).
 
   다음부터는 Launchpad 나 Finder 의 "응용 프로그램" 폴더에서
   URSM 을 열면 됩니다.
 
   처음 열 때는 화면이 나올 때까지 20초쯤 걸립니다.
 
-  안 되는 것: OZ 리포트는 내용이 표시되지 않고, 엑셀 내보내기는
-  지원되지 않습니다.
+  OZ 출력은 맥 기본 브라우저에서 열려 인쇄하거나 PDF로 저장할 수 있습니다.
+  엑셀 내보내기는 ~/Downloads 에 xlsx 로 저장됩니다. 머리글 병합과 셀 서식은
+  보존되지 않습니다.
+  새 버전은 하루 한 번 확인하며, 다음 실행 때 적용됩니다.
 
   지우려면: rm -rf "$DEST"
 

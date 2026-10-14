@@ -1,0 +1,187 @@
+#!/bin/zsh
+# 한세대 URSM (XPLATFORM 9.2) 실행기
+# 다른 화면을 띄우려면 APPKEY / XADL 두 줄만 고치면 된다.
+APPKEY="URSM"
+XADL="http://ims.hansei.ac.kr/URSM.xadl"
+
+BUNDLE="${0:A:h:h}"
+VER="$BUNDLE/Resources/ursm-version"
+UPD="$BUNDLE/Resources/.update"
+# 버전은 GitHub 릴리즈 태그(vX.Y.Z)다. releases/latest 는 최신 릴리즈의 태그 주소로 리다이렉트한다
+# (API 호출 한도·JSON 파싱 없음). 두 주소는 테스트용 환경 seam 이다.
+UPDATE_LATEST="${URSM_UPDATE_LATEST:-https://github.com/jangisaac-dev/ursm-macos/releases/latest}"
+UPDATE_RAW="${URSM_UPDATE_RAW:-https://raw.githubusercontent.com/jangisaac-dev/ursm-macos}"
+BIN="$BUNDLE/Frameworks/wine/bin"
+export WINEPREFIX="$BUNDLE/SharedSupport/prefix"
+# mshtml 은 끄지 않는다. 출력 화면이 Shell.Explorer.2(IE 웹브라우저 컨트롤)로
+# 학교 OZ HTML5 뷰어를 띄우기 때문에, 끄면 빈 흰 창이 된다.
+# gecko 2.47.4 가 Frameworks/wine/share/wine/gecko 에 설치돼 있고
+# HKCU\Software\Wine\MSHTML\2.47.4\GeckoPath 로 등록돼 있다.
+export WINEDLLOVERRIDES="mscoree="
+export WINEDEBUG=-all
+export PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin"
+HAS_CLT=0
+xcode-select -p >/dev/null 2>&1 && HAS_CLT=1
+# 로그는 번들 밖에 둔다. 번들 안에 쓰면 Finder 실행 시 권한 거부로
+# 리다이렉트가 실패하고, 그러면 exec 자체가 실패해 앱이 즉시 죽는다.
+LOG="$HOME/Library/Logs/URSM.log"
+UPDATE_LOG="$HOME/Library/Logs/URSM-update.log"
+mkdir -p "${LOG:h}" 2>/dev/null
+
+update_log() {
+  print -r -- "$(/bin/date '+%Y-%m-%d %H:%M:%S') $*" >> "$UPDATE_LOG"
+}
+
+# XPlatform 창을 화면 맨 앞으로 꺼낸다. wine이 만든 창은 앱 번들 소속이
+# 아니어서 저절로 앞에 오지 않는다. 접근성 권한이 필요 없는 방식.
+bring_to_front() {
+  /usr/bin/python3 - <<'PY' 2>/dev/null
+import time, Quartz
+from AppKit import NSRunningApplication, NSApplicationActivateIgnoringOtherApps
+for _ in range(120):                       # 최대 4분 대기
+    wl = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionAll,
+                                           Quartz.kCGNullWindowID)
+    pids = {w.get('kCGWindowOwnerPID') for w in wl
+            if str(w.get('kCGWindowOwnerName','')).lower() == 'xplatform.exe'
+            and w.get('kCGWindowBounds',{}).get('Width',0) >= 400}
+    if pids:
+        for p in pids:
+            a = NSRunningApplication.runningApplicationWithProcessIdentifier_(int(p))
+            if a:
+                a.unhide()
+                a.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+        break
+    time.sleep(2)
+PY
+}
+
+check_update() {
+  local stamp tmp url tag current_tag ready_tag
+
+  [[ -f "$VER" ]] || return
+  stamp="$BUNDLE/Resources/.update-checked"
+  if [[ -e "$stamp" ]] && [[ -z "$(/usr/bin/find "$stamp" -mmin +1440 -print -quit 2>/dev/null)" ]]; then
+    return
+  fi
+  /usr/bin/touch "$stamp" 2>/dev/null || return
+
+  url=$(/usr/bin/curl -fsSI -m 10 -o /dev/null -w '%{redirect_url}' "$UPDATE_LATEST" 2>/dev/null) || return
+  [[ "$url" == */releases/tag/* ]] || return   # 릴리즈가 하나도 없으면 .../releases 로 간다
+  tag=${url##*/releases/tag/}
+  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return
+  current_tag=$(<"$VER")
+  ready_tag=""
+  [[ -f "$UPD/ready" ]] && ready_tag=$(<"$UPD/ready")
+  [[ "$tag" == "$current_tag" || "$tag" == "$ready_tag" ]] && return
+
+  tmp="$UPD.tmp.$$"
+  /bin/rm -rf "$tmp" 2>/dev/null || true
+  if ! /bin/mkdir -p "$tmp" 2>/dev/null; then
+    /bin/rm -rf "$tmp" 2>/dev/null || true
+    return
+  fi
+  if ! /usr/bin/curl -fsS -m 60 "$UPDATE_RAW/$tag/app/URSM" -o "$tmp/URSM" 2>/dev/null; then
+    /bin/rm -rf "$tmp" 2>/dev/null || true
+    return
+  fi
+  if ! /usr/bin/curl -fsS -m 60 "$UPDATE_RAW/$tag/app/ozcap.py" -o "$tmp/ozcap.py" 2>/dev/null; then
+    /bin/rm -rf "$tmp" 2>/dev/null || true
+    return
+  fi
+  if [[ "$(/usr/bin/head -n 1 "$tmp/URSM")" != "#!/bin/zsh" ]] \
+    || ! /bin/zsh -n "$tmp/URSM" >/dev/null 2>&1 \
+    || [[ ! -s "$tmp/ozcap.py" ]] \
+    || [[ "$(/usr/bin/head -n 1 "$tmp/ozcap.py")" != "#!/usr/bin/env python3" ]]; then
+    /bin/rm -rf "$tmp" 2>/dev/null || true
+    return
+  fi
+  if [[ "$HAS_CLT" == "1" ]] \
+    && ! /usr/bin/python3 -I -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding="utf-8").read())' "$tmp/ozcap.py" >/dev/null 2>&1; then
+    /bin/rm -rf "$tmp" 2>/dev/null || true
+    return
+  fi
+  # 받는 동안 설치기로 수동 업데이트했다면 받은 것은 낡았다. 버리지 않으면 다음 실행에서 되돌린다.
+  if [[ "$(<"$VER")" != "$current_tag" ]] || ! print -r -- "$tag" > "$tmp/ready"; then
+    /bin/rm -rf "$tmp" 2>/dev/null || true
+    return
+  fi
+  if ! /bin/rm -rf "$UPD" 2>/dev/null || ! /bin/mv "$tmp" "$UPD" 2>/dev/null; then
+    /bin/rm -rf "$tmp" 2>/dev/null || true
+    return
+  fi
+  update_log "받음: $tag"
+}
+
+# 프로세스 판별은 실행파일 이름 기준으로만 한다.
+# pgrep -f 는 명령줄 전체를 훑어 무관한 셸까지 오탐한다.
+if pgrep -x -q "XPlatform.exe" 2>/dev/null; then
+  if [[ "$HAS_CLT" == "1" ]]; then
+    bring_to_front
+  fi
+  exit 0
+fi
+
+# 준비된 업데이트를 적용한다. 앱이 이미 떠 있으면 위에서 끝났으므로 실행 중인 세션과 겹치지 않는다.
+# 파일마다 "백업 → 교체"를 하고, .update 에 없는 파일은 앞선 적용이
+# 중간에 끊겨 이미 옮긴 것이므로 건너뛴다. 그래야 .prev 의 진짜 이전 버전을 덮어쓰지 않는다.
+# 버전 파일 교체가 끝나야 새 런처로 넘어간다.
+if [[ -e "$UPD/ready" ]]; then
+  UPDATE_TAG=$(<"$UPD/ready")
+  PREV="$BUNDLE/Resources/.prev"
+  if /bin/mkdir -p "$PREV" 2>/dev/null \
+    && { [[ ! -e "$UPD/ozcap.py" ]] \
+         || { /bin/cp -p "$BUNDLE/Resources/ozcap.py" "$PREV/ozcap.py" \
+              && /bin/mv -f "$UPD/ozcap.py" "$BUNDLE/Resources/ozcap.py"; }; } \
+    && { [[ ! -e "$UPD/URSM" ]] \
+         || { /bin/cp -p "$BUNDLE/MacOS/URSM" "$PREV/URSM" \
+              && /bin/chmod +x "$UPD/URSM" \
+              && /bin/mv -f "$UPD/URSM" "$BUNDLE/MacOS/URSM"; }; } \
+    && /bin/cp -p "$VER" "$PREV/ursm-version" \
+    && /bin/mv -f "$UPD/ready" "$VER"; then
+    /bin/rm -rf "$UPD" 2>/dev/null || true
+    update_log "적용: $UPDATE_TAG"
+    /usr/bin/osascript -e "display notification \"새 버전($UPDATE_TAG)으로 업데이트했습니다.\" with title \"URSM\"" >/dev/null 2>&1 || true
+    # exec 가 실패했는데 아래 복구로 내려가면 새 버전 번호 위에 옛 파일을 덮어 영영 안 받게 된다.
+    exec "$BUNDLE/MacOS/URSM" "$@" || exit 1
+  fi
+  # 실패: 옮겨진 파일(.update 에서 사라진 것)만 .prev 에서 되돌린다. 버전 파일은 바뀌지 않았다.
+  [[ -e "$UPD/ozcap.py" ]] || /bin/cp -p "$PREV/ozcap.py" "$BUNDLE/Resources/ozcap.py" 2>/dev/null
+  [[ -e "$UPD/URSM" ]] || /bin/cp -p "$PREV/URSM" "$BUNDLE/MacOS/URSM" 2>/dev/null
+  /bin/rm -rf "$UPD" 2>/dev/null || true
+  update_log "실패: 적용 $UPDATE_TAG"
+fi
+
+# 비정상 종료로 남은 고아 wine 프로세스 정리 (wineserver -k 로는 안 죽는다)
+"$BIN/wineserver" -k 2>/dev/null
+# zsh 에서 path 는 PATH 와 연결된 특수 배열이라 변수 이름으로 쓰면 PATH 가 깨진다.
+/bin/ps -Ao pid=,comm= | while read -r pid pcomm; do
+  case "$pcomm" in
+    *winetemp-*) /usr/sbin/lsof -p "$pid" 2>/dev/null | /usr/bin/grep -qF "$BUNDLE" \
+                 && /bin/kill -9 "$pid" 2>/dev/null ;;
+  esac
+done
+
+cd "$BIN" || exit 1
+# OZ 출력은 wine 안에서 뜨지 않는다. 앱 트래픽을 로컬 프록시로 보내고
+# 출력 요청만 맥 기본 브라우저로 넘긴다(Resources/ozcap.py, SPEC 7절).
+# 번들 안에 둔다. Finder/Spotlight 로 뜨면 번들 밖 파일은 읽기가 거부된다.
+if [[ "$HAS_CLT" == "1" ]]; then
+  /usr/bin/python3 -I "$BUNDLE/Resources/ozcap.py" 18766 >"$HOME/Library/Logs/URSM-oz.log" 2>&1 &
+  OZCAP_PID=$!
+  # 프록시가 죽었는데 http_proxy 를 넘기면 앱이 서버에 아예 못 붙는다. 살아 있을 때만 넘긴다.
+  sleep 1
+  kill -0 "$OZCAP_PID" 2>/dev/null && export http_proxy=http://127.0.0.1:18766
+fi
+# exec 하지 않는다. 이 프로세스가 앱의 본체로 살아 있어야 Dock 아이콘이
+# 계속 튀지 않고, 창이 뜬 뒤 앞으로 꺼내는 처리도 할 수 있다.
+./wine "C:\\Program Files (x86)\\TOBESOFT\\XPLATFORM\\9.2\\XPlatform.exe" \
+       -K "$APPKEY" -X "$XADL" >"$LOG" 2>&1 &
+WINE_PID=$!
+check_update &!
+if [[ "$HAS_CLT" == "1" ]]; then
+  bring_to_front
+fi
+wait $WINE_PID
+if [[ "$HAS_CLT" == "1" ]]; then
+  kill "$OZCAP_PID" 2>/dev/null
+fi
