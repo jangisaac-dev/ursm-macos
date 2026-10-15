@@ -19,6 +19,9 @@ export WINEPREFIX="$BUNDLE/SharedSupport/prefix"
 # HKCU\Software\Wine\MSHTML\2.47.4\GeckoPath 로 등록돼 있다.
 export WINEDLLOVERRIDES="mscoree="
 export WINEDEBUG=-all
+# wine 은 로케일로 코드페이지를 정한다. Finder 로 띄우면 LANG 이 없어 1252(서유럽어)로 돌고,
+# 실행할 때마다 한글 글꼴 기본값(MS Shell Dlg=Gulim 등)을 서유럽어용으로 다시 쓴다. 설치기와 같은 값으로 고정한다.
+export LANG=ko_KR.UTF-8 LC_ALL=ko_KR.UTF-8
 export PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin"
 HAS_CLT=0
 xcode-select -p >/dev/null 2>&1 && HAS_CLT=1
@@ -34,11 +37,18 @@ update_log() {
 
 # XPlatform 창을 화면 맨 앞으로 꺼낸다. wine이 만든 창은 앱 번들 소속이
 # 아니어서 저절로 앞에 오지 않는다. 접근성 권한이 필요 없는 방식.
+# 인자로 wine PID 를 주면 창이 뜨기 전에 wine 이 끝났을 때 기다리기를 멈춘다. 이 런처가 남아 있으면
+# macOS 는 앱이 아직 실행 중이라 보고, 다시 눌러도 새로 띄우지 않는다.
 bring_to_front() {
-  /usr/bin/python3 - <<'PY' 2>/dev/null
-import time, Quartz
+  /usr/bin/python3 - "$@" <<'PY' 2>/dev/null
+import os, sys, time, Quartz
 from AppKit import NSRunningApplication, NSApplicationActivateIgnoringOtherApps
 for _ in range(120):                       # 최대 4분 대기
+    if len(sys.argv) > 1:
+        try:
+            os.kill(int(sys.argv[1]), 0)
+        except OSError:
+            break
     wl = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionAll,
                                            Quartz.kCGNullWindowID)
     pids = {w.get('kCGWindowOwnerPID') for w in wl
@@ -116,7 +126,7 @@ check_update() {
 # pgrep -f 는 명령줄 전체를 훑어 무관한 셸까지 오탐한다.
 if pgrep -x -q "XPlatform.exe" 2>/dev/null; then
   if [[ "$HAS_CLT" == "1" ]]; then
-    bring_to_front
+    bring_to_front "$(pgrep -x XPlatform.exe 2>/dev/null | head -n 1)"
   fi
   exit 0
 fi
@@ -179,7 +189,7 @@ fi
 WINE_PID=$!
 check_update &!
 if [[ "$HAS_CLT" == "1" ]]; then
-  bring_to_front
+  bring_to_front "$WINE_PID"
 fi
 wait $WINE_PID
 if [[ "$HAS_CLT" == "1" ]]; then
