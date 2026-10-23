@@ -47,6 +47,15 @@
 - 앱은 하루 한 번 새 버전을 확인해 받아 두고, 다음 실행 때 적용합니다. 적용되면 "새 버전(v1.1.0)으로 업데이트했습니다"처럼 알림이 뜹니다. 로그인 기록은 유지됩니다.
 - 버전마다 바뀐 점은 [Releases](https://github.com/jangisaac-dev/ursm-macos/releases)에 정리합니다.
 - **v1.0.0(2026년 9월)으로 설치하셨다면** 위 설치 명령을 한 번 다시 실행한 뒤 `[U] 업데이트`를 고르세요. 로그인 기록은 그대로 두고 출력·엑셀 기능과 자동 업데이트가 들어갑니다. 그다음부터는 자동으로 업데이트됩니다.
+- **이전 버전으로 되돌리기**: 아래 명령을 실행하고 `[U] 업데이트`를 고르면 로그인 기록을 유지한 채 해당 버전으로 고정합니다. 자동 업데이트는 꺼진 상태로 유지됩니다. 선택할 버전은 [Releases](https://github.com/jangisaac-dev/ursm-macos/releases)에서 확인하세요. 선택 가능한 가장 오래된 버전은 `v1.1.0`입니다.
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/jangisaac-dev/ursm-macos/main/install.sh | URSM_VERSION=v1.1.0 sh
+  ```
+  최신 버전으로 바꾸려면 위의 일반 설치 명령을 다시 실행하고 `[U] 업데이트`를 고르세요.
+- **v1.0.0(2026년 9월 버전)으로 되돌리기**: `v1.1.0`으로도 안 되면 아래 명령으로 v1.0.0을 새로 설치하세요. "지우고 새로 설치할까요?"에 `y`를 누르면 앱을 지우고 다시 만들기 때문에 로그인 기록이 지워지고, 출력·엑셀 기능도 빠집니다. v1.0.0은 스스로 업데이트하지 않습니다.
+  ```sh
+  curl -fsSL https://raw.githubusercontent.com/jangisaac-dev/ursm-macos/v1.0.0/install.sh | sh
+  ```
 
 ## 잘 안 될 때
 
@@ -102,6 +111,8 @@ prefix를 한국어 로케일(`ko_KR.UTF-8`)로 만들기 때문에 wine이 코�
 ### 자동 업데이트
 
 버전은 이 저장소의 릴리즈 태그(`vX.Y.Z`)다. 런처는 하루 한 번 `releases/latest`가 가리키는 태그를 확인하고(GitHub API를 쓰지 않아 호출 한도가 없다), 설치된 버전과 다르면 그 태그의 `app/URSM`, `app/ozcap.py`를 받아 두었다가 다음 실행 때 적용한다. `main`에 push만 해서는 배포되지 않고, 릴리즈를 만들어야 배포된다. 바뀌는 파일은 URSM 런처, `ozcap.py`, `ursm-version` 세 개뿐이고, 이전 버전은 `Contents/Resources/.prev/`에 보존한다. 따라서 이 저장소의 최신 릴리즈에 담긴 코드가 사용자 Mac에서 실행된다.
+
+`URSM_VERSION`을 지정하면 해당 릴리즈 태그로 고정하고 `ursm-version` 파일을 두지 않아 런처가 자동 업데이트 확인을 건너뛴다.
 
 ### 통신 경로
 

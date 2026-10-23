@@ -25,9 +25,17 @@ GULIM_SHA="e658caecd9723d87bb0660de2d24b8310c8b11d27d812e2587e9c46c6e48abdd"
 APPKEY="URSM"
 XADL="http://ims.hansei.ac.kr/URSM.xadl"
 
-mkdir -p "${LOG%/*}" "$CACHE"
 log() { printf '%s  %s\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG"; }
 die() { printf '\n실패: %s\n로그: %s\n' "$*" "$LOG" >&2; exit 1; }
+
+if [ -n "${URSM_VERSION:-}" ]; then
+  VALID_VERSION=1
+  case "$URSM_VERSION" in *[!v0-9.]*) VALID_VERSION=0 ;; esac
+  [ "$VALID_VERSION" -eq 1 ] \
+    && printf '%s\n' "$URSM_VERSION" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' \
+    || die "URSM_VERSION 값이 올바르지 않습니다: $URSM_VERSION (예: v1.1.0)"
+fi
+mkdir -p "${LOG%/*}" "$CACHE"
 
 # --- 0. 사전 점검 ---------------------------------------------------------
 [ "$(uname -s)" = "Darwin" ] || die "macOS 전용이다."
@@ -106,6 +114,9 @@ fetch() { # url sha 파일명
 }
 
 fetch_app() {
+  if [ -n "${URSM_VERSION:-}" ]; then
+    REF=$URSM_VERSION
+  else
   # 최신 릴리즈 태그(vX.Y.Z). releases/latest 가 태그 주소로 리다이렉트한다. 못 얻으면 아무것도 바꾸지
   # 않고 멈춘다(릴리즈하지 않은 main 의 코드를 깔지 않는다).
   REF=$(curl -fsSI -m 15 --retry 3 -o /dev/null -w '%{redirect_url}' "$UPDATE_LATEST" 2>/dev/null || true)
@@ -115,6 +126,7 @@ fetch_app() {
   esac
   printf '%s' "$REF" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' \
     || die "최신 릴리즈를 확인하지 못했다. 인터넷 연결을 확인하고 다시 실행해 주세요."
+  fi
 
   APP_STAGE="$CACHE/app.$$"
   mkdir -p "$APP_STAGE"
@@ -153,8 +165,13 @@ install_app() {
          && chmod 755 "$RES/.ozcap.py.$$" && mv "$RES/.ozcap.py.$$" "$RES/ozcap.py" \
          && cp "$APP_STAGE/URSM" "$C/MacOS/.URSM.$$" \
          && chmod 755 "$C/MacOS/.URSM.$$" && mv "$C/MacOS/.URSM.$$" "$C/MacOS/URSM" \
-         && printf '%s\n' "$REF" > "$RES/.ursm-version.$$" \
-         && mv "$RES/.ursm-version.$$" "$RES/ursm-version"; } 2>>"$LOG"; then
+         && if [ -n "${URSM_VERSION:-}" ]; then
+              # 옛 런처도 버전 파일이 없으면 자동 업데이트를 건너뛴다.
+              rm -f "$RES/ursm-version"
+            else
+              printf '%s\n' "$REF" > "$RES/.ursm-version.$$" \
+                && mv "$RES/.ursm-version.$$" "$RES/ursm-version"
+            fi; } 2>>"$LOG"; then
     for f in "$C/MacOS/URSM" "$RES/ozcap.py" "$RES/ursm-version"; do
       if [ -e "$BK/${f##*/}" ]; then cp -p "$BK/${f##*/}" "$f" 2>/dev/null || true
       else rm -f "$f"; fi
@@ -186,11 +203,20 @@ if [ "$UPDATE_MODE" -eq 1 ]; then
   xattr -d com.apple.quarantine "$C/MacOS/URSM" "$C/Resources/ozcap.py" \
     "$C/Resources/ursm-version" 2>/dev/null || true
   offer_clt_install
-  cat <<EOF
+  if [ -n "${URSM_VERSION:-}" ]; then
+    cat <<EOF
+
+업데이트했습니다. 버전 ${REF}에 고정했으며 자동 업데이트는 꺼져 있습니다.
+URSM 이 켜져 있으면 종료 후 다시 열어야 적용됩니다.
+최신 버전으로 바꾸려면 일반 설치 명령을 다시 실행하고 [U] 업데이트를 고르세요.
+EOF
+  else
+    cat <<EOF
 
 업데이트했습니다 (버전 $REF). URSM 이 켜져 있으면 종료 후 다시 열어야 적용됩니다.
 앞으로는 앱이 새 버전을 스스로 받아 둡니다.
 EOF
+  fi
   exit 0
 fi
 
@@ -300,6 +326,11 @@ xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
 offer_clt_install
 trap - EXIT
 
+UPDATE_NOTICE='  새 버전은 하루 한 번 확인하며, 다음 실행 때 적용됩니다.'
+if [ -n "${URSM_VERSION:-}" ]; then
+  UPDATE_NOTICE="  버전 ${REF}에 고정했으며 자동 업데이트는 꺼져 있습니다.
+  최신 버전으로 바꾸려면 일반 설치 명령을 다시 실행하고 [U] 업데이트를 고르세요."
+fi
 cat <<EOF
 
 설치가 끝났습니다 (버전 $REF).
@@ -312,7 +343,7 @@ cat <<EOF
   OZ 출력은 맥 기본 브라우저에서 열려 인쇄하거나 PDF로 저장할 수 있습니다.
   엑셀 내보내기는 ~/Downloads 에 xlsx 로 저장됩니다. 머리글 병합과 셀 서식은
   보존되지 않습니다.
-  새 버전은 하루 한 번 확인하며, 다음 실행 때 적용됩니다.
+$UPDATE_NOTICE
 
   지우려면: rm -rf "$DEST"
 
